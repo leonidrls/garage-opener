@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Garage">
+<meta name="theme-color" content="#0b0f17">
+<title>Garage Opener</title>
+<style>
+  :root{
+    --bg:#0b0f17; --card:#131a26; --fg:#eaf0fb; --muted:#8ea0bf;
+    --accent:#37d67a; --accent-press:#2bb866; --danger:#e5484d; --wait:#f5a524; --ring:#1f2a3c;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--fg);
+    font:16px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    display:flex;flex-direction:column;align-items:center;
+    padding:max(16px,env(safe-area-inset-top)) 16px max(16px,env(safe-area-inset-bottom));min-height:100%;}
+  header{width:100%;max-width:460px;display:flex;align-items:center;justify-content:space-between;margin:6px 0 20px}
+  h1{font-size:18px;font-weight:700;margin:0}
+  .dot{width:11px;height:11px;border-radius:50%;background:var(--danger);box-shadow:0 0 0 4px rgba(229,72,77,.15);transition:.2s}
+  .dot.on{background:var(--accent);box-shadow:0 0 0 4px rgba(55,214,122,.15)}
+  .dot.wait{background:var(--wait);box-shadow:0 0 0 4px rgba(245,165,36,.15)}
+  main{width:100%;max-width:460px;display:flex;flex-direction:column;gap:16px;flex:1}
+  button{font:inherit;font-weight:700;color:var(--fg);border:1px solid var(--ring);
+    background:#1b2433;border-radius:14px;padding:15px;width:100%;cursor:pointer;
+    transition:transform .05s ease,background .15s ease;}
+  button:active{transform:scale(.98)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  .open{background:var(--accent);color:#06240f;border:none;font-size:30px;font-weight:800;
+    height:min(44vh,320px);border-radius:26px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px}
+  .open:active{background:var(--accent-press)}
+  .open small{font-weight:600;font-size:14px;opacity:.8}
+  .ico{width:46px;height:46px}
+  .row{display:flex;gap:12px}.row button{flex:1}
+  #status{font-size:14px;color:var(--muted);text-align:center;min-height:20px}
+  .card{background:var(--card);border:1px solid var(--ring);border-radius:14px;padding:14px;font-size:13px;color:var(--muted);line-height:1.55}
+  .card b{color:var(--fg)} .warn{color:var(--wait)}
+</style>
+</head>
+<body>
+<header><h1>Garage Opener</h1><div id="dot" class="dot"></div></header>
+<main>
+  <button id="openBtn" class="open" disabled>
+    <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="#06240f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10l9-6 9 6"/><path d="M4 10v10h16V10"/><path d="M7 20v-6h10v6"/></svg>
+    OPEN
+    <small id="sub">connect first</small>
+  </button>
+  <div class="row">
+    <button id="connectBtn">Connect Flipper</button>
+    <button id="disconnectBtn" disabled>Disconnect</button>
+  </div>
+  <div id="status">Not connected</div>
+  <div class="card">
+    <p style="margin:0 0 8px"><span class="warn">iPhone:</span> open this page in the <b>Bluefy</b> browser (App Store). Safari and Chrome on iPhone can't use Bluetooth. Android: use Chrome.</p>
+    <p style="margin:0 0 8px">Turn the Flipper's <b>Bluetooth ON</b> and leave it on its <b>home screen</b>. Tap <b>Connect Flipper</b> once, then use the big <b>OPEN</b> button. Keep the Flipper near the gate.</p>
+    <p style="margin:0">Tip: <b>Add to Home Screen</b> for a one-tap icon.</p>
+  </div>
+</main>
+<script>
+// Flipper BLE serial RPC — verified protocol. Sends the saved garage signal.
+const SERVICE="8fe5b3d5-2e7f-4a98-2a48-7acc60fe0000";
+const CH_WRITE="19ed82ae-ed21-4c9d-4145-228e62fe0000";
+const CH_READ ="19ed82ae-ed21-4c9d-4145-228e61fe0000";
+const CH_FLOW ="19ed82ae-ed21-4c9d-4145-228e63fe0000";
+const FILE="/ext/subghz/car_open.sub";   // the garage/gate signal (fixed CAME code)
+
+const $=id=>document.getElementById(id);
+const dot=$("dot"),status=$("status"),openBtn=$("openBtn"),sub=$("sub"),
+      connectBtn=$("connectBtn"),disconnectBtn=$("disconnectBtn");
+let device=null,chWrite=null,cmdId=1,busy=false;
+
+function setState(s,msg){
+  dot.className="dot"+(s==="on"?" on":s==="wait"?" wait":"");
+  status.textContent=msg;
+  const c=s==="on"; openBtn.disabled=!c||busy; disconnectBtn.disabled=!c;
+  connectBtn.disabled=(s==="wait"); sub.textContent=c?"ready":(s==="wait"?"…":"connect first");
+}
+function varint(n){const b=[];n=Math.floor(n);while(true){let x=n%128;n=Math.floor(n/128);if(n)b.push(x|0x80);else{b.push(x);break;}}return b;}
+function tag(f,w){return varint((f<<3)|w);}
+function strF(f,s){const u=new TextEncoder().encode(s);return[...tag(f,2),...varint(u.length),...u];}
+function msgF(f,b){return[...tag(f,2),...varint(b.length),...b];}
+function vF(f,n){return[...tag(f,0),...varint(n)];}
+function main(id,cf,inner){const body=[...vF(1,id),...msgF(cf,inner)];return new Uint8Array([...varint(body.length),...body]);}
+const startReq=()=>[...strF(1,"Sub-GHz"),...strF(2,"RPC")];
+const loadReq=p=>strF(1,p);
+async function writeFramed(bytes){for(let i=0;i<bytes.length;i+=180){await chWrite.writeValueWithResponse(bytes.slice(i,i+180));}}
+async function send(cf,inner){const id=cmdId;cmdId=(cmdId%0xFFFFFFFF)+1;await writeFramed(main(id,cf,inner));}
+const delay=ms=>new Promise(r=>setTimeout(r,ms));
+
+async function connect(){
+  if(!navigator.bluetooth){setState("off","Open in Bluefy (iPhone) or Chrome (Android).");connectBtn.disabled=true;return;}
+  try{
+    setState("wait","Select your Flipper…");
+    device=await navigator.bluetooth.requestDevice({filters:[{namePrefix:"Flipper"}],optionalServices:[SERVICE]});
+    device.addEventListener("gattserverdisconnected",onDisc);
+    setState("wait","Connecting…");
+    const srv=await device.gatt.connect(); const s=await srv.getPrimaryService(SERVICE);
+    chWrite=await s.getCharacteristic(CH_WRITE);
+    const r=await s.getCharacteristic(CH_READ); await r.startNotifications(); r.addEventListener("characteristicvaluechanged",()=>{});
+    try{const f=await s.getCharacteristic(CH_FLOW);await f.startNotifications();}catch(_){}
+    cmdId=1; setState("on","Connected to "+(device.name||"Flipper"));
+  }catch(e){setState("off",friendly(e));}
+}
+function onDisc(){chWrite=null;setState("off","Disconnected");}
+async function disconnect(){try{if(device&&device.gatt.connected)device.gatt.disconnect();}catch(_){}onDisc();}
+async function openGarage(){
+  if(!chWrite||busy)return; busy=true; openBtn.disabled=true; sub.textContent="sending…";
+  try{
+    await send(16,startReq()); await delay(1600);
+    await send(48,loadReq(FILE)); await delay(350);
+    await send(49,[]); await delay(1300);      // press -> transmit
+    await send(50,[]); await delay(300);        // release
+    await send(47,[]); await delay(400);        // exit
+    busy=false; status.textContent="Opened ✓  "+new Date().toLocaleTimeString(); sub.textContent="ready"; openBtn.disabled=false;
+  }catch(e){busy=false; if(device&&device.gatt.connected){openBtn.disabled=false;sub.textContent="ready";} setState(device&&device.gatt.connected?"on":"off","Failed: "+friendly(e));}
+}
+function friendly(e){const m=(e&&e.message)||String(e);
+  if(/cancelled/i.test(m))return"Cancelled — tap Connect again.";
+  if(/GATT|disconnected/i.test(m))return"Lost the Flipper — reconnect.";
+  if(/not found|Service|No Services/i.test(m))return"Flipper not found — turn its Bluetooth ON, home screen.";
+  if(/globally disabled|adapter/i.test(m))return"Turn on the phone's Bluetooth.";
+  return m;}
+connectBtn.addEventListener("click",connect);
+disconnectBtn.addEventListener("click",disconnect);
+openBtn.addEventListener("click",openGarage);
+if(!navigator.bluetooth) setState("off","iPhone: open in the Bluefy browser. Android: use Chrome.");
+</script>
+</body>
+</html>
